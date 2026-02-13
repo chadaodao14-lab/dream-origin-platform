@@ -1,0 +1,149 @@
+    }
+
+    /**
+     * 分配给发起人上级团队
+     */
+    protected function distributeToUplineTeam(int $ownerId, float $amount, int $projectId): void
+    {
+        $agentService = new AgentService();
+        $chain = $agentService->getUplineChain($ownerId, 5); // 最多5层上级
+        
+        if (empty($chain)) {
+            // 无上级，归属平台
+            FundFlow::create([
+                'type' => 'platform',
+                'direction' => 'income',
+                'amount' => $amount,
+                'source' => 'project_profit',
+                'related_id' => $projectId,
+                'remark' => "项目#{$projectId} 团队收益(无上级)"
+            ]);
+            return;
+        }
+
+        // 平均分配给上级链
+        $sharePerPerson = round($amount / count($chain), 2);
+        
+        foreach ($chain as $item) {
+            $asset = Asset::firstOrCreate(['user_id' => $item['user']->id]);
+            $asset->increment('available_balance', $sharePerPerson);
+            
+            // 记录明细 (可扩展独立表)
+            Log::info('项目团队收益分配', [
+                'project_id' => $projectId,
+                'user_id' => $item['user']->id,
+                'amount' => $sharePerPerson
+            ]);
+        }
+    }
+}
+
+ 5.5 CharityService.php
+<?php
+
+namespace App\Services;
+
+use App\Models\CharityFlow;
+use App\Models\CharityDonation;
+use App\Models\FundFlow;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+class CharityService
+{
+    /**
+     * 获取慈善基金余额
+     */
+    public function getBalance(): float
+    {
+        $income = CharityFlow::where('type', 'income')->sum('amount');
+        $expense = CharityFlow::where('type', 'donation')->sum('amount');
+        
+        return round($income - $expense, 2);
+    }
+
+    /**
+     * 捐赠记录列表
+     */
+    public function listDonations(?int $year = null, int $page = 1, int $pageSize = 10): array
+    {
+        $query = CharityDonation::query()->orderBy('donate_date', 'desc');
+        
+        if ($year) {
+            $query->whereYear('donate_date', $year);
+        }
+        
+        $total = $query->count();
+        $list = $query->offset(($page - 1) * $pageSize)->limit($pageSize)->get();
+        
+        return [
+            'total' => $total,
+            'page' => $page,
+            'pageSize' => $pageSize,
+            'list' => $list
+        ];
+    }
+
+    /**
+     * 慈善统计
+     */
+    public function statistics(): array
+    {
+        // 按季度统计
+        $quarterly = CharityDonation::selectRaw('
+            CONCAT(YEAR(donate_date), "-Q", QUARTER(donate_date)) as quarter,
+            SUM(amount) as total
+        ')
+        ->groupByRaw('YEAR(donate_date), QUARTER(donate_date)')
+        ->orderByRaw('YEAR(donate_date) DESC, QUARTER(donate_date) DESC')
+        ->limit(8)
+        ->get();
+
+        // 按年度统计
+        $yearly = CharityDonation::selectRaw('
+            YEAR(donate_date) as year,
+            SUM(amount) as total
+        ')
+        ->groupByRaw('YEAR(donate_date)')
+        ->orderBy('year', 'desc')
+        ->limit(5)
+        ->get();
+
+        // 按机构分布
+        $organizationDistribution = CharityDonation::selectRaw('
+            organization,
+            SUM(amount) as total,
+            COUNT(*) as count
+        ')
+        ->groupBy('organization')
+        ->orderBy('total', 'desc')
+        ->limit(10)
+        ->get();
+
+        return [
+            'balance' => $this->getBalance(),
+            'quarterly' => $quarterly,
+            'yearly' => $yearly,
+            'organization_distribution' => $organizationDistribution
+        ];
+    }
+
+    /**
+     * 执行捐赠 (管理员)
+     */
+    public function executeDonation(float $amount, string $organization, string $donateDate, ?string $proofFile = null, ?string $description = null): CharityDonation
+    {
+        return DB::transaction(function () use ($amount, $organization, $donateDate, $proofFile, $description) {
+            // 检查余额
+            if ($this->getBalance() < $amount) {
+                throw new \Exception('慈善基金余额不足');
+            }
+
+            // 创建捐赠记录
+            $donation = CharityDonation::create([
+                'amount' => $amount,
+                'organization' => $organization,
+                'donate_date' => $donateDate,
+                'proof_file' => $proofFile,
+                'description' => $description
+            ]);
