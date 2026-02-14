@@ -1,0 +1,111 @@
+name: 梦之源平台自动化部署
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: 使用 Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    
+    - name: 安装依赖
+      run: npm ci
+    
+    - name: 运行测试
+      run: npm test
+    
+    - name: 构建项目
+      run: npm run build
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: 设置 Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: 安装依赖
+      run: npm ci
+    
+    - name: 构建生产版本
+      run: npm run build
+    
+    - name: 部署到服务器
+      uses: appleboy/ssh-action@v0.1.10
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT || '22' }}
+        script: |
+          cd /www/wwwroot/dreamsource
+          
+          # 备份当前版本
+          if [ -d "backup" ]; then
+            rm -rf backup_old
+            mv backup backup_old
+          fi
+          cp -r . backup
+          
+          # 拉取最新代码
+          git stash
+          git pull origin main
+          git stash pop
+          
+          # 安装依赖
+          npm install --production
+          
+          # 重启服务
+          pm2 reload ecosystem.config.js
+          
+          # 清理缓存
+          npm cache clean --force
+          
+          echo "部署完成时间: $(date)"
+
+  notification:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: success()
+    
+    steps:
+    - name: 发送部署成功通知
+      uses: slackapi/slack-github-action@v1.23.0
+      with:
+        payload: |
+          {
+            "text": "✅ 梦之源创业投资平台部署成功",
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "🎉 *梦之源平台部署成功*\n\n• 部署分支: `${{ github.ref }}`\n• 部署时间: `$(date)`\n• 提交信息: `${{ github.event.head_commit.message }}`"
+                }
+              }
+            ]
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}

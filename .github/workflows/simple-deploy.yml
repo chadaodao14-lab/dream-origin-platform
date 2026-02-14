@@ -1,0 +1,47 @@
+name: 简易部署流程
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v3
+    
+    - name: 设置 Node.js 环境
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+    
+    - name: 安装依赖
+      run: npm install
+    
+    - name: 运行测试
+      run: npm test
+    
+    - name: 构建项目
+      run: npm run build
+    
+    - name: 部署到服务器
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.PRIVATE_KEY }}
+        source: "."
+        target: "/www/wwwroot/dreamsource"
+    
+    - name: 重启服务
+      uses: appleboy/ssh-action@v0.1.10
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.PRIVATE_KEY }}
+        script: |
+          cd /www/wwwroot/dreamsource
+          npm install --production
+          pm2 reload ecosystem.config.js
